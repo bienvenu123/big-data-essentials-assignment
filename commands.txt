@@ -1,0 +1,135 @@
+================================================================================
+NYC TLC TAXI BIG DATA ANALYTICS - COMMANDS.TXT
+All HDFS and Hadoop Streaming commands needed to reproduce this project.
+================================================================================
+
+--------------------------------------------------------------------------------
+1. CLUSTER STARTUP
+--------------------------------------------------------------------------------
+start-dfs.cmd
+start-yarn.cmd
+jps
+hdfs dfsadmin -report
+
+--------------------------------------------------------------------------------
+2. HDFS DIRECTORY STRUCTURE SETUP
+--------------------------------------------------------------------------------
+hdfs dfs -mkdir -p /taxi_project/input/raw
+hdfs dfs -mkdir -p /taxi_project/input/cleaned
+hdfs dfs -mkdir -p /taxi_project/output/hourly
+hdfs dfs -mkdir -p /taxi_project/output/locations
+hdfs dfs -mkdir -p /taxi_project/output/revenue
+hdfs dfs -mkdir -p /taxi_project/output/payment
+hdfs dfs -mkdir -p /taxi_project/output/routes
+hdfs dfs -mkdir -p /taxi_project/output/anomalies
+hdfs dfs -mkdir -p /taxi_project/archive
+
+hdfs dfs -ls -R /taxi_project
+
+--------------------------------------------------------------------------------
+3. DATASET PREPARATION (local, pre-HDFS)
+--------------------------------------------------------------------------------
+# Download source Parquet files (NYC TLC official source)
+powershell -Command "Invoke-WebRequest -Uri 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet' -OutFile 'C:\taxi_data\yellow_tripdata_2024-01.parquet'"
+powershell -Command "Invoke-WebRequest -Uri 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-02.parquet' -OutFile 'C:\taxi_data\yellow_tripdata_2024-02.parquet'"
+
+# Convert Parquet -> CSV (see convert_parquet_to_csv.py)
+python C:\taxi_data\convert_parquet_to_csv.py
+
+# Clean data - identify/report/remove invalid records (see clean_taxi_data.py)
+python C:\taxi_data\clean_taxi_data.py
+
+--------------------------------------------------------------------------------
+4. UPLOAD DATA TO HDFS
+--------------------------------------------------------------------------------
+# Raw data
+hdfs dfs -put C:\taxi_data\csv\yellow_tripdata_2024-01.csv /taxi_project/input/raw/
+hdfs dfs -put C:\taxi_data\csv\yellow_tripdata_2024-02.csv /taxi_project/input/raw/
+hdfs dfs -put C:\Users\HP\Downloads\taxi_zone_lookup.csv /taxi_project/input/raw/
+
+# Cleaned data
+hdfs dfs -put C:\taxi_data\cleaned\yellow_tripdata_2024-01.csv /taxi_project/input/cleaned/
+hdfs dfs -put C:\taxi_data\cleaned\yellow_tripdata_2024-02.csv /taxi_project/input/cleaned/
+
+# Cleaning report -> archive
+hdfs dfs -put C:\taxi_data\cleaning_report.txt /taxi_project/archive/
+
+# Verify uploads
+hdfs dfs -ls -h /taxi_project/input/raw/
+hdfs dfs -du -h /taxi_project/input/raw/
+hdfs dfs -ls -h /taxi_project/input/cleaned/
+hdfs dfs -du -h /taxi_project/input/cleaned/
+
+--------------------------------------------------------------------------------
+5. MAPREDUCE JOBS (Hadoop Streaming)
+--------------------------------------------------------------------------------
+# All commands run from C:\taxi_project (mapper/reducer .py files and
+# taxi_zone_lookup.csv copied here beforehand).
+# NOTE (Windows-specific): the -files argument must be double-quoted when it
+# contains a comma-separated list, or cmd.exe splits it into separate args.
+
+# --- Job 1: Hourly Taxi Demand ---
+hdfs dfs -rm -r /taxi_project/output/hourly
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_hourly.py,reducer_hourly.py" -input /taxi_project/input/cleaned -output /taxi_project/output/hourly -mapper "python mapper_hourly.py" -reducer "python reducer_hourly.py"
+
+# --- Job 2: Daily Demand ---
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_daily.py,reducer_daily.py" -input /taxi_project/input/cleaned -output /taxi_project/output/daily -mapper "python mapper_daily.py" -reducer "python reducer_daily.py"
+
+# --- Job 3: Pickup Location Analysis ---
+hdfs dfs -rm -r /taxi_project/output/locations
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_location.py,reducer_location.py,taxi_zone_lookup.csv" -input /taxi_project/input/cleaned -output /taxi_project/output/locations -mapper "python mapper_location.py" -reducer "python reducer_location.py"
+
+# --- Job 4: Revenue by Pickup Location (Multi-Stage: Stage 1) ---
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_revenue.py,reducer_revenue.py,taxi_zone_lookup.csv" -input /taxi_project/input/cleaned -output /taxi_project/output/revenue -mapper "python mapper_revenue.py" -reducer "python reducer_revenue.py"
+
+# --- Job 5: Payment Method Analysis ---
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_payment.py,reducer_payment.py" -input /taxi_project/input/cleaned -output /taxi_project/output/payment -mapper "python mapper_payment.py" -reducer "python reducer_payment.py"
+
+# --- Job 6: Distance-Based Fare Analysis ---
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_distance.py,reducer_distance.py" -input /taxi_project/input/cleaned -output /taxi_project/output/distance -mapper "python mapper_distance.py" -reducer "python reducer_distance.py"
+
+# --- Job 7: Busiest Pickup-Dropoff Routes ---
+hdfs dfs -rm -r /taxi_project/output/routes
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_route.py,reducer_route.py,taxi_zone_lookup.csv" -input /taxi_project/input/cleaned -output /taxi_project/output/routes -mapper "python mapper_route.py" -reducer "python reducer_route.py"
+
+# --- Job 8: Trip Duration Analysis ---
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_duration.py,reducer_duration.py" -input /taxi_project/input/cleaned -output /taxi_project/output/duration -mapper "python mapper_duration.py" -reducer "python reducer_duration.py"
+
+# --- Job 9: Anomaly Detection (run on RAW/uncleaned data) ---
+hdfs dfs -rm -r /taxi_project/output/anomalies
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_anomaly.py,reducer_anomaly.py" -input /taxi_project/input/raw -output /taxi_project/output/anomalies -mapper "python mapper_anomaly.py" -reducer "python reducer_anomaly.py"
+
+# --- Job 10: Top 10 Revenue Zones (Multi-Stage: Stage 2) ---
+# Consumes Job 4's HDFS output directly as input - demonstrates true multi-stage chaining.
+hadoop jar %HADOOP_HOME%\share\hadoop\tools\lib\hadoop-streaming-3.2.4.jar -files "mapper_top_revenue.py,reducer_top_revenue.py" -input /taxi_project/output/revenue -output /taxi_project/output/top_revenue_zones -mapper "python mapper_top_revenue.py" -reducer "python reducer_top_revenue.py" -numReduceTasks 1
+
+--------------------------------------------------------------------------------
+6. VIEW RESULTS
+--------------------------------------------------------------------------------
+hdfs dfs -cat /taxi_project/output/hourly/part-00000
+hdfs dfs -cat /taxi_project/output/daily/part-00000
+hdfs dfs -cat /taxi_project/output/locations/part-00000
+hdfs dfs -cat /taxi_project/output/revenue/part-00000
+hdfs dfs -cat /taxi_project/output/payment/part-00000
+hdfs dfs -cat /taxi_project/output/distance/part-00000
+hdfs dfs -cat /taxi_project/output/routes/part-00000
+hdfs dfs -cat /taxi_project/output/duration/part-00000
+hdfs dfs -cat /taxi_project/output/anomalies/part-00000
+hdfs dfs -cat /taxi_project/output/top_revenue_zones/part-00000
+
+--------------------------------------------------------------------------------
+7. PERFORMANCE COMPARISON (Pandas vs MapReduce)
+--------------------------------------------------------------------------------
+python C:\taxi_project\perf_compare_pandas.py
+# Compare timing against Job 1 (Hourly Taxi Demand) YARN log timestamps.
+
+--------------------------------------------------------------------------------
+8. YARN MONITORING
+--------------------------------------------------------------------------------
+# Web UI: http://localhost:8088/cluster
+# Screenshot each completed application showing Application ID, State,
+# FinalStatus, Start/Launch/Finish times, and container counts.
+
+================================================================================
+END OF COMMANDS.TXT
+================================================================================
